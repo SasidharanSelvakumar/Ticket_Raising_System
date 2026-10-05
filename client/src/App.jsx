@@ -31,6 +31,9 @@ export default function App() {
   const [loginStep, setLoginStep] = useState('email'); // 'email' | 'otp'
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
+  const [otpToken, setOtpToken] = useState(() => {
+    return sessionStorage.getItem('ticket_otp_token') || '';
+  });
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState(null);
   const [authMessage, setAuthMessage] = useState(null);
@@ -119,8 +122,14 @@ export default function App() {
         throw new Error(data.error || 'Failed to send OTP.');
       }
 
+      // Store stateless OTP token
+      if (data.otpToken) {
+        setOtpToken(data.otpToken);
+        sessionStorage.setItem('ticket_otp_token', data.otpToken);
+      }
+
       setLoginStep('otp');
-      setAuthMessage('OTP sent! Check your server console (Demo Mode).');
+      setAuthMessage(data.message || 'OTP sent! Please check your email inbox.');
     } catch (err) {
       setAuthError(err.message);
     } finally {
@@ -143,7 +152,11 @@ export default function App() {
       const res = await fetch('/api/verify-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.trim(), otp: otp.trim() })
+        body: JSON.stringify({
+          email: email.trim(),
+          otp: otp.trim(),
+          otpToken
+        })
       });
 
       const data = await res.json();
@@ -153,8 +166,10 @@ export default function App() {
 
       const sessionData = { token: data.token, email: data.email };
       sessionStorage.setItem('ticket_auth', JSON.stringify(sessionData));
+      sessionStorage.removeItem('ticket_otp_token');
       setAuth(sessionData);
       setOtp('');
+      setOtpToken('');
       setAuthMessage(null);
     } catch (err) {
       setAuthError(err.message);
@@ -176,10 +191,12 @@ export default function App() {
       }
     }
     sessionStorage.removeItem('ticket_auth');
+    sessionStorage.removeItem('ticket_otp_token');
     setAuth(null);
     setTickets([]);
     setLoginStep('email');
     setOtp('');
+    setOtpToken('');
     setAuthError(null);
     setAuthMessage(null);
   };
@@ -235,6 +252,8 @@ export default function App() {
   const handleUseDifferentEmail = () => {
     setLoginStep('email');
     setOtp('');
+    setOtpToken('');
+    sessionStorage.removeItem('ticket_otp_token');
     setAuthError(null);
     setAuthMessage(null);
   };

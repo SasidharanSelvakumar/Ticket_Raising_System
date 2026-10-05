@@ -33,14 +33,70 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
   console.log('No EMAIL_USER / EMAIL_PASS found in server/.env — running in Demo Mode (OTP logged to console).');
 }
 
-// In-memory store for OTPs: email -> { otp, expiresAt, attempts }
-// OTP expires in 5 minutes, max 5 wrong attempts
-const otpStore = new Map();
-const OTP_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+// Change OTP validity duration here (in seconds):
+const OTP_EXPIRY_SECONDS = 60; // 60 seconds (adjust to 120, 300, etc. anytime)
+const OTP_EXPIRY_MS = OTP_EXPIRY_SECONDS * 1000;
 const MAX_OTP_ATTEMPTS = 5;
 
-// In-memory store for user sessions: token -> { email, createdAt }
+// Secret key for stateless HMAC signing (works reliably across Vercel serverless functions)
+const JWT_SECRET = process.env.SESSION_SECRET || 'ticketdesk-secret-key-2026';
+
+// In-memory store for OTPs & sessions (used as fallback for local development)
+const otpStore = new Map();
 const sessions = new Map();
+
+// Helper: Create stateless signed OTP token
+function createOtpToken(email, otp, expiresAt) {
+  const payload = Buffer.from(JSON.stringify({ email, otp, expiresAt })).toString('base64url');
+  const signature = crypto.createHmac('sha256', JWT_SECRET).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+// Helper: Verify stateless OTP token
+function verifyOtpToken(token, inputEmail, inputOtp) {
+  if (!token || typeof token !== 'string') return { valid: false, error: 'Invalid or missing OTP token.' };
+  const parts = token.split('.');
+  if (parts.length !== 2) return { valid: false, error: 'Invalid OTP token format.' };
+  const [payload, signature] = parts;
+  const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(payload).digest('base64url');
+  if (signature !== expectedSig) return { valid: false, error: 'Invalid or tampered OTP token.' };
+
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (data.email !== inputEmail) return { valid: false, error: 'Email mismatch.' };
+    if (Date.now() > data.expiresAt) return { valid: false, error: 'OTP expired. Request a new one.' };
+    if (data.otp !== inputOtp) return { valid: false, error: 'Wrong OTP.' };
+    return { valid: true };
+  } catch {
+    return { valid: false, error: 'Corrupted OTP token.' };
+  }
+}
+
+// Helper: Create stateless session token
+function createSessionToken(email) {
+  const payload = Buffer.from(JSON.stringify({ email, createdAt: Date.now() })).toString('base64url');
+  const signature = crypto.createHmac('sha256', JWT_SECRET).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+// Helper: Verify stateless session token
+function verifySessionToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payload, signature] = parts;
+  const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(payload).digest('base64url');
+  if (signature !== expectedSig) return null;
+
+  try {
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
 
 // Helper: Read tickets from JSON file
 function readTickets() {
@@ -104,7 +160,8 @@ function authenticate(req, res, next) {
   }
 
   const token = authHeader.split(' ')[1];
-  const session = sessions.get(token);
+  // Verify stateless token first (works seamlessly on Vercel), fallback to in-memory Map
+  const session = verifySessionToken(token) || sessions.get(token);
 
   if (!session) {
     return res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
@@ -131,18 +188,22 @@ app.post('/api/send-otp', async (req, res) => {
 
   // Generate a secure 6-digit numeric OTP
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = Date.now() + OTP_EXPIRY_MS;
 
-  // Store in memory with 5-minute expiry and 0 attempts
+  // Generate a stateless signed token (so Vercel serverless cold starts never lose it)
+  const otpToken = createOtpToken(normalizedEmail, otp, expiresAt);
+
+  // Also store in memory as local fallback
   otpStore.set(normalizedEmail, {
     otp,
-    expiresAt: Date.now() + OTP_EXPIRY_MS,
+    expiresAt,
     attempts: 0
   });
 
   // Always log OTP to server console for debugging/demo safety
   console.log('--------------------------------------------------');
   console.log(`[OTP] Generated for ${normalizedEmail}: ${otp}`);
-  console.log(`Valid for 5 minutes. Attempts allowed: ${MAX_OTP_ATTEMPTS}`);
+  console.log(`Valid for ${OTP_EXPIRY_SECONDS} seconds. Attempts allowed: ${MAX_OTP_ATTEMPTS}`);
   console.log('--------------------------------------------------');
 
   // If email transporter is configured, send the real email!
@@ -152,7 +213,7 @@ app.post('/api/send-otp', async (req, res) => {
         from: `"Ticket Support Desk" <${process.env.EMAIL_USER}>`,
         to: normalizedEmail,
         subject: `${otp} is your TicketDesk verification code`,
-        text: `Your TicketDesk login OTP is ${otp}. It will expire in 5 minutes.`,
+        text: `Your TicketDesk login OTP is ${otp}. It will expire in ${OTP_EXPIRY_SECONDS} seconds.`,
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff;">
             <div style="text-align: center; margin-bottom: 20px;">
@@ -166,7 +227,7 @@ app.post('/api/send-otp', async (req, res) => {
                 ${otp}
               </span>
             </div>
-            <p style="color: #64748b; font-size: 13px; line-height: 1.5;">This code will expire in <strong>5 minutes</strong>. If you did not request this code, you can safely ignore this email.</p>
+            <p style="color: #64748b; font-size: 13px; line-height: 1.5;">This code will expire in <strong>${OTP_EXPIRY_SECONDS} seconds</strong>. If you did not request this code, you can safely ignore this email.</p>
             <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
             <p style="color: #94a3b8; font-size: 11px; text-align: center; margin: 0;">TicketDesk Help & Support System</p>
           </div>
@@ -174,26 +235,30 @@ app.post('/api/send-otp', async (req, res) => {
       });
 
       console.log(`[SUCCESS] Email successfully delivered to ${normalizedEmail}`);
-      return res.json({ message: 'OTP sent! Please check your email inbox.' });
+      return res.json({
+        message: 'OTP sent! Please check your email inbox.',
+        otpToken
+      });
     } catch (mailErr) {
       console.error('[ERROR] Failed to send email via Nodemailer:', mailErr.message);
-      // Fallback response with helpful explanation
       return res.json({
-        message: 'Could not deliver email. Check server console for OTP (or verify EMAIL_USER/EMAIL_PASS in server/.env).'
+        message: 'Could not deliver email. Check server console for OTP (or verify EMAIL_USER/EMAIL_PASS).',
+        otpToken
       });
     }
   }
 
   // Fallback when no email credentials provided
   return res.json({
-    message: 'OTP generated! (Add EMAIL_USER & EMAIL_PASS in server/.env to send to real inbox).'
+    message: 'OTP generated! (Add EMAIL_USER & EMAIL_PASS to send to real inbox).',
+    otpToken
   });
 });
 
 // 2. POST /api/verify-otp
-// Verifies OTP, creates in-memory session token, and deletes OTP upon success
+// Verifies OTP, creates session token, and deletes OTP upon success
 app.post('/api/verify-otp', (req, res) => {
-  const { email, otp } = req.body;
+  const { email, otp, otpToken } = req.body;
 
   if (!email || !otp) {
     return res.status(400).json({ error: 'Email and OTP are required.' });
@@ -202,39 +267,39 @@ app.post('/api/verify-otp', (req, res) => {
   const normalizedEmail = email.trim().toLowerCase();
   const trimmedOtp = otp.toString().trim();
 
-  const record = otpStore.get(normalizedEmail);
-
-  if (!record) {
-    return res.status(400).json({ error: 'No OTP requested for this email or OTP expired.' });
-  }
-
-  // Check if OTP has expired (5 minutes)
-  if (Date.now() > record.expiresAt) {
-    otpStore.delete(normalizedEmail);
-    return res.status(400).json({ error: 'OTP expired. Request a new one.' });
-  }
-
-  // Check if maximum wrong attempts reached
-  if (record.attempts >= MAX_OTP_ATTEMPTS) {
-    otpStore.delete(normalizedEmail);
-    return res.status(429).json({ error: 'Too many wrong attempts. Please request a new OTP.' });
-  }
-
-  // Compare OTP
-  if (record.otp !== trimmedOtp) {
-    record.attempts += 1;
-    if (record.attempts >= MAX_OTP_ATTEMPTS) {
-      otpStore.delete(normalizedEmail);
-      return res.status(429).json({ error: 'Too many wrong attempts. Please request a new OTP.' });
+  // Method 1: Stateless HMAC token verification (guaranteed to work across all Vercel serverless instances)
+  if (otpToken) {
+    const result = verifyOtpToken(otpToken, normalizedEmail, trimmedOtp);
+    if (!result.valid) {
+      return res.status(400).json({ error: result.error });
     }
-    return res.status(400).json({ error: 'Wrong OTP.' });
+  } else {
+    // Method 2: Fallback to in-memory otpStore (local development)
+    const record = otpStore.get(normalizedEmail);
+
+    if (!record) {
+      return res.status(400).json({ error: 'No OTP requested for this email or OTP expired.' });
+    }
+
+    if (Date.now() > record.expiresAt) {
+      otpStore.delete(normalizedEmail);
+      return res.status(400).json({ error: 'OTP expired. Request a new one.' });
+    }
+
+    if (record.otp !== trimmedOtp) {
+      record.attempts = (record.attempts || 0) + 1;
+      if (record.attempts >= MAX_OTP_ATTEMPTS) {
+        otpStore.delete(normalizedEmail);
+        return res.status(429).json({ error: 'Too many wrong attempts. Please request a new OTP.' });
+      }
+      return res.status(400).json({ error: 'Wrong OTP.' });
+    }
+
+    otpStore.delete(normalizedEmail);
   }
 
-  // OTP is correct: delete from store to prevent reuse
-  otpStore.delete(normalizedEmail);
-
-  // Generate session token and store in memory
-  const token = crypto.randomUUID();
+  // Generate stateless session token (works across all Vercel instances)
+  const token = createSessionToken(normalizedEmail);
   sessions.set(token, {
     email: normalizedEmail,
     createdAt: Date.now()
