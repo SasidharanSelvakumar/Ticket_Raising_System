@@ -291,7 +291,7 @@ export default function App() {
               </button>
 
               <div className="demo-badge">
-                💡 <strong>Demo Mode:</strong> The 6-digit OTP will be logged in your backend terminal console.
+                📬 <strong>Verification Code:</strong> The 6-digit OTP will be delivered to your email inbox (or logged in the server console if running in demo mode).
               </div>
             </form>
           ) : (
@@ -336,7 +336,7 @@ export default function App() {
               </div>
 
               <div className="demo-badge">
-                💡 <strong>Demo Mode:</strong> Look at your server terminal output to find the OTP code.
+                📬 Check your email inbox for the OTP (or the server console if email credentials aren't configured).
               </div>
             </form>
           )}

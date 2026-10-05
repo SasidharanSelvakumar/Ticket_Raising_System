@@ -1,8 +1,10 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = 5000;
@@ -11,6 +13,21 @@ const TICKETS_FILE = path.join(__dirname, 'tickets.json');
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Configure Nodemailer transporter if email credentials are provided in .env
+let transporter = null;
+if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    }
+  });
+  console.log(`Email service configured with sender: ${process.env.EMAIL_USER}`);
+} else {
+  console.log('No EMAIL_USER / EMAIL_PASS found in server/.env — running in Demo Mode (OTP logged to console).');
+}
 
 // In-memory store for OTPs: email -> { otp, expiresAt, attempts }
 // OTP expires in 5 minutes, max 5 wrong attempts
@@ -93,7 +110,7 @@ function authenticate(req, res, next) {
 
 // 1. POST /api/send-otp
 // Generates and sends a 6-digit OTP for the given email
-app.post('/api/send-otp', (req, res) => {
+app.post('/api/send-otp', async (req, res) => {
   const { email } = req.body;
 
   if (!email || !isValidEmail(email)) {
@@ -112,25 +129,55 @@ app.post('/api/send-otp', (req, res) => {
     attempts: 0
   });
 
-  // ==========================================================================
-  // DEMO MODE: Print OTP in the SERVER console
-  // Note: For production email delivery, Nodemailer can be configured here:
-  //
-  //   const nodemailer = require('nodemailer');
-  //   const transporter = nodemailer.createTransport({ ... });
-  //   await transporter.sendMail({
-  //     from: '"Ticket Support" <support@example.com>',
-  //     to: normalizedEmail,
-  //     subject: 'Your Ticket System Login OTP',
-  //     text: `Your OTP is: ${otp}. It will expire in 5 minutes.`
-  //   });
-  // ==========================================================================
+  // Always log OTP to server console for debugging/demo safety
   console.log('--------------------------------------------------');
-  console.log(`[DEMO MODE] OTP for ${normalizedEmail}: ${otp}`);
+  console.log(`[OTP] Generated for ${normalizedEmail}: ${otp}`);
   console.log(`Valid for 5 minutes. Attempts allowed: ${MAX_OTP_ATTEMPTS}`);
   console.log('--------------------------------------------------');
 
-  return res.json({ message: 'OTP sent successfully. Check your server console (Demo Mode).' });
+  // If email transporter is configured, send the real email!
+  if (transporter) {
+    try {
+      await transporter.sendMail({
+        from: `"Ticket Support Desk" <${process.env.EMAIL_USER}>`,
+        to: normalizedEmail,
+        subject: `${otp} is your TicketDesk verification code`,
+        text: `Your TicketDesk login OTP is ${otp}. It will expire in 5 minutes.`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff;">
+            <div style="text-align: center; margin-bottom: 20px;">
+              <span style="font-size: 36px;">🎫</span>
+              <h2 style="color: #0d9488; margin: 8px 0 0 0; font-size: 22px;">TicketDesk Support</h2>
+            </div>
+            <p style="color: #334155; font-size: 15px; line-height: 1.5;">Hello,</p>
+            <p style="color: #334155; font-size: 15px; line-height: 1.5;">Your one-time login verification code is:</p>
+            <div style="text-align: center; margin: 24px 0;">
+              <span style="display: inline-block; font-size: 32px; font-weight: 700; letter-spacing: 6px; color: #0f172a; background-color: #f0fdfa; border: 1px solid #99f6e4; padding: 12px 24px; border-radius: 8px;">
+                ${otp}
+              </span>
+            </div>
+            <p style="color: #64748b; font-size: 13px; line-height: 1.5;">This code will expire in <strong>5 minutes</strong>. If you did not request this code, you can safely ignore this email.</p>
+            <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+            <p style="color: #94a3b8; font-size: 11px; text-align: center; margin: 0;">TicketDesk Help & Support System</p>
+          </div>
+        `
+      });
+
+      console.log(`[SUCCESS] Email successfully delivered to ${normalizedEmail}`);
+      return res.json({ message: 'OTP sent! Please check your email inbox.' });
+    } catch (mailErr) {
+      console.error('[ERROR] Failed to send email via Nodemailer:', mailErr.message);
+      // Fallback response with helpful explanation
+      return res.json({
+        message: 'Could not deliver email. Check server console for OTP (or verify EMAIL_USER/EMAIL_PASS in server/.env).'
+      });
+    }
+  }
+
+  // Fallback when no email credentials provided
+  return res.json({
+    message: 'OTP generated! (Add EMAIL_USER & EMAIL_PASS in server/.env to send to real inbox).'
+  });
 });
 
 // 2. POST /api/verify-otp

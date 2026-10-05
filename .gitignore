@@ -4,5 +4,12 @@
 # Production builds
 **/dist/
 
+# Environment variables
+.env
+.env.local
+*.env
+!.env.example
+
 # Logs
 *.log
+
