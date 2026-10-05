@@ -1,0 +1,20 @@
+[
+  {
+    "id": "T-0001",
+    "email": "testuser@example.com",
+    "title": "Cannot access billing page",
+    "description": "Receiving 403 Forbidden error when trying to view invoices.",
+    "priority": "High",
+    "status": "Open",
+    "createdAt": "2026-10-05T11:23:22.984Z"
+  },
+  {
+    "id": "T-0002",
+    "email": "alex@example.com",
+    "title": "The dashboard was not working properly.",
+    "description": "Please ensure that we cannot proceed with some other work because of this.",
+    "priority": "High",
+    "status": "Open",
+    "createdAt": "2026-10-05T11:32:34.943Z"
+  }
+]
