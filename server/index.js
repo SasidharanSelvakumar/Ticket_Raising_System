@@ -8,7 +8,11 @@ const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = 5000;
-const TICKETS_FILE = path.join(__dirname, 'tickets.json');
+
+// On Vercel, the local filesystem is read-only except /tmp
+const TICKETS_FILE = process.env.VERCEL
+  ? path.join('/tmp', 'tickets.json')
+  : path.join(__dirname, 'tickets.json');
 
 // Middleware
 app.use(cors());
@@ -42,8 +46,14 @@ const sessions = new Map();
 function readTickets() {
   try {
     if (!fs.existsSync(TICKETS_FILE)) {
-      fs.writeFileSync(TICKETS_FILE, JSON.stringify([], null, 2), 'utf8');
-      return [];
+      // If on Vercel, copy initial tickets from project if available
+      const localFile = path.join(__dirname, 'tickets.json');
+      let initialData = '[]';
+      if (fs.existsSync(localFile)) {
+        initialData = fs.readFileSync(localFile, 'utf8') || '[]';
+      }
+      fs.writeFileSync(TICKETS_FILE, initialData, 'utf8');
+      return JSON.parse(initialData);
     }
     const data = fs.readFileSync(TICKETS_FILE, 'utf8');
     return data.trim() ? JSON.parse(data) : [];
@@ -293,7 +303,12 @@ app.post('/api/logout', authenticate, (req, res) => {
   return res.json({ message: 'Logged out successfully.' });
 });
 
-// Start Express server on Port 5000
-app.listen(PORT, () => {
-  console.log(`Backend server running on http://localhost:${PORT}`);
-});
+// Start Express server locally (skipped on Vercel serverless)
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Backend server running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
+
